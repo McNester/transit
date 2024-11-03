@@ -4,9 +4,22 @@ import numpy as np
 from datetime import datetime, timedelta
 import argparse
 import sys
+import os
+from pathlib import Path
+
+def get_default_csv_path():
+    """Get the default CSV path from the project directory"""
+    project_dir = Path(__file__).parent
+    default_path = project_dir / "dwell_sorted.csv"
+    return str(default_path)
 
 def load_and_preprocess_csv(csv_path):
     try:
+        # Check if file exists
+        if not os.path.exists(csv_path):
+            print(f"Error: File not found at {csv_path}")
+            return None
+            
         # Read CSV file
         df = pd.read_csv(csv_path)
         
@@ -30,6 +43,58 @@ def load_and_preprocess_csv(csv_path):
     except Exception as e:
         print(f"Error loading CSV file: {str(e)}")
         return None
+
+def show_available_trips(df):
+    """Display all available trip IDs with additional information"""
+    print("\nAvailable Trip IDs:")
+    print("-" * 80)
+    print(f"{'Trip ID':<15} {'Direction':<10} {'First Stop':<10} {'Last Stop':<10} {'Date':<12}")
+    print("-" * 80)
+    
+    for trip_id in sorted(df['trip_id'].unique()):
+        trip_data = df[df['trip_id'] == trip_id].sort_values('arrival_time')
+        if not trip_data.empty:
+            first_record = trip_data.iloc[0]
+            last_record = trip_data.iloc[-1]
+            print(f"{trip_id:<15} {str(first_record['direction']):<10} "
+                  f"{str(first_record['bus_stop']):<10} {str(last_record['bus_stop']):<10} "
+                  f"{first_record['date'].strftime('%Y-%m-%d'):<12}")
+    print("-" * 80)
+    print(f"Total number of unique trips: {df['trip_id'].nunique()}")
+
+def show_stops_for_trip(df, trip_id=None):
+    """Display all stops with their details, optionally filtered by trip_id"""
+    if trip_id:
+        trip_data = df[df['trip_id'] == trip_id].sort_values('arrival_time')
+        if trip_data.empty:
+            print(f"\nNo data found for trip ID: {trip_id}")
+            return
+        
+        print(f"\nStops for Trip ID: {trip_id}")
+        print(f"Direction: {trip_data.iloc[0]['direction']}")
+        print("-" * 60)
+        print(f"{'Stop ID':<10} {'Arrival Time':<20} {'Dwell Time (s)':<15}")
+        print("-" * 60)
+        
+        for _, row in trip_data.iterrows():
+            print(f"{str(row['bus_stop']):<10} "
+                  f"{row['arrival_time'].strftime('%Y-%m-%d %H:%M:%S'):<20} "
+                  f"{row['dwell_time_in_seconds']:<15.1f}")
+    else:
+        print("\nAll Available Stops:")
+        print("-" * 50)
+        print(f"{'Stop ID':<10} {'Times Used':<12} {'Avg Dwell Time (s)':<20}")
+        print("-" * 50)
+        
+        stop_stats = df.groupby('bus_stop').agg({
+            'trip_id': 'count',
+            'dwell_time_in_seconds': 'mean'
+        }).reset_index()
+        
+        for _, row in stop_stats.sort_values('bus_stop').iterrows():
+            print(f"{str(row['bus_stop']):<10} "
+                  f"{row['trip_id']:<12} "
+                  f"{row['dwell_time_in_seconds']:<20.1f}")
 
 def calculate_estimates(group_data):
     data = group_data.copy()
@@ -159,16 +224,19 @@ def estimate_arrival_time(df, target_trip_id=None, target_stop=None):
 
 def main():
     parser = argparse.ArgumentParser(description='Transit Arrival Time Prediction Tool')
-    parser.add_argument('csv_path', help='Path to the CSV file containing transit data')
+    parser.add_argument('--csv', default=get_default_csv_path(),
+                       help='Path to the CSV file (default: dwell_sorted.csv in project directory)')
     parser.add_argument('--trip', help='Specific trip ID to predict')
     parser.add_argument('--stop', help='Specific stop to predict')
     parser.add_argument('--output', help='Path to save results (optional)')
     parser.add_argument('--debug', action='store_true', help='Show debug information')
+    parser.add_argument('--showTrips', action='store_true', help='Show all available trip IDs')
+    parser.add_argument('--showStops', action='store_true', help='Show all stops or stops for specific trip (use with --trip)')
     
     args = parser.parse_args()
     
-    print(f"Loading data from: {args.csv_path}")
-    transit_data = load_and_preprocess_csv(args.csv_path)
+    print(f"Loading data from: {args.csv}")
+    transit_data = load_and_preprocess_csv(args.csv)
     
     if transit_data is None:
         print("Failed to load data. Exiting.")
@@ -180,11 +248,16 @@ def main():
     print(f"Number of unique stops: {transit_data['bus_stop'].nunique()}")
     print(f"Date range: {transit_data['date'].min()} to {transit_data['date'].max()}")
     
-    if args.debug:
-        print("\nAvailable directions:", sorted(transit_data['direction'].unique()))
-        print("Sample of trip IDs:", sorted(transit_data['trip_id'].unique())[:5])
-        print("All stops:", sorted(transit_data['bus_stop'].unique()))
+    # Handle information display flags
+    if args.showTrips:
+        show_available_trips(transit_data)
+        return
+        
+    if args.showStops:
+        show_stops_for_trip(transit_data, args.trip)
+        return
     
+    # Continue with prediction if no display flags are set
     try:
         if args.trip and args.stop:
             prediction = estimate_arrival_time(transit_data, 
@@ -208,18 +281,15 @@ Time window: {prediction['lower_bound']} to {prediction['upper_bound']}
                         f.write(results)
                     print(f"\nResults saved to: {args.output}")
         else:
-            estimates = estimate_arrival_time(transit_data)
-            print("\nGenerated estimates for all stops and directions")
-            
-            if args.output:
-                with open(args.output, 'w') as f:
-                    for (direction, stop) in estimates.index:
-                        stats = estimates.loc[(direction, stop)]
-                        if pd.notna(stats['mean_travel_time']):
-                            f.write(f"\nDirection: {direction}, Stop: {stop}\n")
-                            f.write(f"Average travel time: {stats['mean_travel_time']/60:.1f} minutes\n")
-                            f.write(f"Standard deviation: {stats['std_travel_time']/60:.1f} minutes\n")
-                print(f"\nResults saved to: {args.output}")
+            if not (args.showTrips or args.showStops):
+                print("\nPlease specify either:")
+                print("1. --trip and --stop for predictions")
+                print("2. --showTrips to see available trips")
+                print("3. --showStops [--trip TRIP_ID] to see stops")
+                print("\nExample usage:")
+                print("python estimator.py --trip 1 --stop 114")
+                print("python estimator.py --showTrips")
+                print("python estimator.py --showStops --trip 1")
     
     except Exception as e:
         print(f"Error during prediction: {str(e)}")

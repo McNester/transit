@@ -39,7 +39,7 @@ env/
 .DS_Store
 
 # Project specific
-*.csv
+#*.csv
 *.txt
 !requirements.txt
 output/
